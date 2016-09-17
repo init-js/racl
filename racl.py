@@ -1,27 +1,39 @@
 #!/usr/bin/env python2
+
+"""racl.py
+
+  Solicit a router and listen for Router Advertisement (RA) messages.
+
+"""
+
 import socket
+import datetime
 import scapy.all as A
 import netifaces
-import datetime
+
 
 def get_if_macaddr(iface):
-    """ returns macaddr of interface or None. raises ValueError if no such interface"""
-    addrs = netifaces.ifaddresses(iface)
+    """ returns macaddr of interface or None.
+        raises ValueError if no such interface
+    """
+    addrs = netifaces.ifaddresses(iface) # pylint: disable=no-member
     return addrs.get(socket.AF_PACKET, [{"addr":None}])[0]["addr"]
 
 def get_link_local_v6(iface):
-    """ returns a link local ipv6 for interface iface, or None. raises ValueError if no such interface """
-    addrs = netifaces.ifaddresses(iface)
-    link_locals = [ x['addr'] for x in addrs.get(socket.AF_INET6, [])
-                    if x.get('addr', "").startswith("fe80::") ]
+    """ returns a link local ipv6 for interface iface, or None.
+        raises ValueError if no such interface
+    """
+    addrs = netifaces.ifaddresses(iface) # pylint: disable=no-member
+    link_locals = [x['addr'] for x in addrs.get(socket.AF_INET6, [])
+                   if x.get('addr', "").startswith("fe80::")]
     return link_locals[0] if link_locals else None
 
 def get_addrinfo(ipstr):
-        bind_addr = [addr for addr in socket.getaddrinfo(ipstr, None)
-                        if socket.AF_INET6 == addr[0]] # You ussually want the first one.
-        if not bind_addr:
-            raise ValueError("Couldn't find ipv6 address for source %s" % source_ip)
-        return bind_addr
+    """ get the internet address from the given string """
+    bind_addr = [addr for addr in socket.getaddrinfo(ipstr, None, socket.AF_INET6)]
+    if not bind_addr:
+        raise ValueError("couldn't find ipv6 address for ip %s" % (ipstr,))
+    return bind_addr
 
 def scopeless(ipstr):
     """ remove link-local scope id from ipv6 addr string (if any)"""
@@ -43,11 +55,13 @@ def _bind_socket(sock, addr6="::", ifname=""):
     bind_addr = get_addrinfo(addr6)
     sock.bind(bind_addr[0][-1])
 
-def send_RS(opts):
+def send_rs(opts):
+    """send a router solicitation message"""
 
     # valid interface
-    if not opts.interface in netifaces.interfaces():
-        raise ValueError("Expected '%s' to be an ipv6 address or a valid interface name" % (opts.interface,))
+    if not opts.interface in netifaces.interfaces(): #pylint: disable=no-member
+        raise ValueError("invalid interface name '%s'" % (
+            opts.interface,))
 
     # valid router
     get_addrinfo(opts.router)
@@ -56,7 +70,7 @@ def send_RS(opts):
         # bind to link-local ipv6 address on interface
         src_ip6addr = get_link_local_v6(opts.interface)
         if not src_ip6addr:
-            raise ValueError("Interface '%s' has no ipv6 link-local address" % (opts.interface))
+            raise ValueError("interface '%s' has no ipv6 link-local address" % (opts.interface))
     else:
         # any ip on the interface
         src_ip6addr = "::"
@@ -69,27 +83,30 @@ def send_RS(opts):
     sock.setblocking(0)
     _bind_socket(sock, src_ip6addr, opts.interface)
 
-    pkt = A.IPv6(src=scopeless(src_ip6addr), dst=opts.router)/A.ICMPv6ND_RS()
+    pkt = A.IPv6(src=scopeless(src_ip6addr), dst=opts.router)/A.ICMPv6ND_RS() #pylint: disable=no-member
 
     if not opts.use_unspecified_src:
         # when the source IPv6 is not '::', RFC4861 requires a
         # source link local address option to be added.
         src_link_addr = get_if_macaddr(opts.interface)
         if not src_link_addr:
-            raise ValueError("Interface '%s' requires a mac address" % (opts.interface,))
+            raise ValueError("interface '%s' requires a mac address" % (opts.interface,))
 
-        pkt = pkt / A.ICMPv6NDOptSrcLLAddr(lladdr=src_link_addr)
+        pkt = pkt / A.ICMPv6NDOptSrcLLAddr(lladdr=src_link_addr) #pylint: disable=no-member
 
     sock.sendto(pkt.build(), (opts.router, 0))
     sock.close()
 
-def recv_RA(opts):
+def recv_ra(opts):
+    """listen for router advertisement messages"""
+
     sock = socket.socket(socket.AF_INET6, socket.SOCK_RAW, socket.getprotobyname("ipv6-icmp"))
+
     if not opts.use_unspecified_src:
         # bind to link-local ipv6 address on interface
         src_ip6addr = get_link_local_v6(opts.interface)
         if not src_ip6addr:
-            raise ValueError("Interface '%s' has no ipv6 link-local address" % (opts.interface))
+            raise ValueError("interface '%s' has no ipv6 link-local address" % (opts.interface))
     else:
         # any ip on the interface
         src_ip6addr = "::"
@@ -101,9 +118,9 @@ def recv_RA(opts):
         peer_ipv6 = addr[0]
 
         # parse
-        pkt = A.ICMPv6Unknown(data)
+        pkt = A.ICMPv6Unknown(data) #pylint: disable=no-member
         if pkt.type == 134: # router advertisement
-            pkt = A.ICMPv6ND_RA(data)
+            pkt = A.ICMPv6ND_RA(data) #pylint: disable=no-member
             tstamp = datetime.datetime.utcnow().isoformat()
             print "%(ts)s ROUTER %(peer)s M=%(M)s O=%(O)s" % {
                 "ts": tstamp,
@@ -115,20 +132,24 @@ def recv_RA(opts):
                     prefix = opt.prefix
                     prefix_len = opt.prefixlen
                     is_on_link = opt.L
-                    is_auto    = opt.A
-                    # seconds that prefix is valid for purposes of on-link determination. 0xffffffff is infinity.
+                    is_auto = opt.A
+                    # seconds that prefix is valid for purposes of
+                    # on-link determination.  0xffffffff is infinity.
                     valid_sec = opt.validlifetime
-                    # seconds that slaac addresses on prefix should be considered preferred
-                    pref_sec  = opt.preferredlifetime
-                    print "%(ts)s %(prefix)s/%(prefix_len)s is_Auto=%(is_auto)s on_Link=%(on_link)s valid_sec=%(valid_sec)s pref_sec=%(pref_sec)s" % {
-                        "ts": tstamp,
-                        "prefix": prefix, "prefix_len": prefix_len,
-                        "is_auto": is_auto, "on_link": is_on_link,
-                        "valid_sec": valid_sec, "pref_sec": pref_sec
-                    }
+                    # seconds that slaac addresses on prefix should be
+                    # considered preferred.
+                    pref_sec = opt.preferredlifetime
+                    print ("%(ts)s %(prefix)s/%(prefix_len)s is_Auto=%(is_auto)s "
+                           "on_Link=%(on_link)s valid_sec=%(valid_sec)s pref_sec=%(pref_sec)s") % {
+                               "ts": tstamp,
+                               "prefix": prefix, "prefix_len": prefix_len,
+                               "is_auto": is_auto, "on_link": is_on_link,
+                               "valid_sec": valid_sec, "pref_sec": pref_sec
+                           }
                 opt = opt.payload
 
-if __name__ == "__main__":
+def main():
+    """command line entry point"""
     import argparse
 
     if not socket.has_ipv6:
@@ -143,6 +164,10 @@ if __name__ == "__main__":
                         help="uses :: as the ipv6 source")
     opts = parser.parse_args()
 
-    send_RS(opts)
-    recv_RA(opts)
+    send_rs(opts)
+    recv_ra(opts)
+    return 0
 
+if __name__ == "__main__":
+    import sys
+    sys.exit(main())
