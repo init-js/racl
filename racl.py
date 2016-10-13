@@ -161,67 +161,150 @@ class OptRA(Struct):
     def __len__(self):
         return self.length*8
 
+    def output(self, _, log):
+        'outputs textual representation to the log'
+        log("option type=%s length=%sB" % (self.type, self.length * 8))
+
 class OptAdIval(OptRA):
     'Advertisement Interval'
+    # RFC6275
     FMT = (OptRA.FMT +
            '{reserved}H'
            '{interval_ms}I')
     TYPE = 7
+    #pylint: disable-msg=no-member
+
+    def output(self, _, log):
+        log("option adv_interval interval_ms=%(interval_ms)s" % {
+            "interval_ms": self.interval_ms
+        })
 
 class OptRouteInfo(OptRA):
     'Route Information'
+    # RFC4191
     FMT = (OptRA.FMT +
            '{prefixlen}B{flags:3Res1:-2Prf:3Res2}B'
            '{lifetime}I')
     TYPE = 24
-    __slots__ = ('prefix',)
+    __slots__ = ('_prefix',)
 
     #pylint: disable-msg=no-member
+
     def __init__(self, data):
         super(OptRouteInfo, self).__init__(data)
-        prefix_bytes = (self.length - 1) * 8
-        self.prefix = data[8:8+prefix_bytes]
-        self.prefix += "\x00" * (16-len(self.prefix))
+        prf_bytes = (self.length - 1) * 8
+        prf = data[8:8+prf_bytes]
+        self._prefix = prf + "\x00" * (16-len(prf))
+
+    @property
+    def prefix(self):
+        'get ipv6 string'
+        return ipv6_from_b(self._prefix)
+
+    def output(self, _, log):
+        log("option route %(prefix)s/%(prefixlen)s Prf=%(Prf)s "
+            "lifetime=%(lifetime)s" % {
+                "prefix": self.prefix, "prefixlen": self.prefixlen,
+                "Prf": self.Prf, "lifetime": self.lifetime
+            })
 
 class RecursiveDNS(OptRA):
     'Recursive DNS Servers'
+    # RFC6106
     FMT = (OptRA.FMT +
            '{reserved}H'
-           '{lifetime}I') # rel max time, in sec, the server may be used. 0xffffffff is infinity
+           '{lifetime}I') # rel max time, in sec, the server may be used. 0xffffffff is infinity.
+                          # 0 means don't use anymore.
     TYPE = 25
-    __slots__ = ('addresses',)
+    __slots__ = ('_addresses',)
 
     #pylint: disable-msg=no-member
+
     def __init__(self, data):
         super(RecursiveDNS, self).__init__(data)
         num_addresses = (self.length - 1) / 2
-        self.addresses = [data[i+8:i+24] for i in range(0, num_addresses)]
+        self._addresses = [data[i+8:i+24] for i in range(0, num_addresses)]
 
-class DNSSearch(Struct):
+    @property
+    def addresses(self):
+        'get ipv6 address strings'
+        return [ipv6_from_b(addr) for addr in self._addresses]
+
+
+    def output(self, ra_msg, log):
+        for addr in self.addresses:
+            if addr.startswith("fe80::"):
+                addr += "%" + ra_msg.scope
+            log("option rdnss address=%s lifetime=%s" % (addr, self.lifetime))
+
+class DNSSearch(OptRA):
     'DNS Search List'
     FMT = (OptRA.FMT +
            '{reserved}H'
-           '{lifetime}I')
+           '{lifetime}I') # max time in secons over which this dnssl domain name may be used. 0xffffffff is infinity.
+                          # a value of 0 means should no longer be used.
+    # RFC6106
     TYPE = 31
-    __slots__ = ('domain_names',)
+    __slots__ = ('_names',)
 
-    #pylint: disable-msg:no-member
+    #pylint: disable-msg=no-member
+
     def __init__(self, data):
         super(DNSSearch, self).__init__(data)
-        self.domain_names = data[8:len(self)-8]
-        first_nul = self.domain_names.find("\x00")
+        self._names = data[8:len(self)-8]
+        first_nul = self._names.find("\x00")
         if first_nul > -1:
             # remove padding
-            self.domain_names = self.domain_names[:first_nul]
+            self._names = self._names[:first_nul]
 
-class OptMTU(Struct):
+    @property
+    def names(self):
+        'return decoded names list'
+
+        # encoded as sec 3.1 of https://tools.ietf.org/html/rfc1035
+        # each domain name is (\0xnnN_characters)*[\x00]
+
+        names = []
+        rest = self._names
+        while len(rest) > 0:
+            labels = []
+            while len(rest) > 0 and rest[0] != "\x00":
+                label_len = ord(rest[0])
+                if len(rest) <= label_len:
+                    # incomplete name
+                    labels = []
+                    rest = ""
+                    break
+                labels.append(rest[1:1+label_len])
+                rest = rest[1+label_len:]
+
+            if labels:
+                names.append(".".join(labels))
+                labels.append(rest[1:1+label_len])
+        return names
+
+    def output(self, _, log):
+        name_list = self.names
+        if name_list:
+            for name in name_list:
+                log("option dnssl domain_name=%s lifetime=%s" % (name, self.lifetime))
+        else:
+            log("option dnssl domain_name= lifetime=%s" % (self.lifetime,))
+
+class OptMTU(OptRA):
     'MTU Option'
     FMT = (OptRA.FMT +
            "{reserved}H"
            "{mtu}I")
     TYPE = 5
+    #pylint: disable-msg=no-member
 
-class OptSrcLLA(Struct):
+    def output(self, _, log):
+        log("option mtu mtu=%(mtu)s" % {
+            "mtu": self.mtu
+        })
+
+class OptSrcLLA(OptRA):
     'SrcLinkLayerAddress'
     FMT = (OptRA.FMT +
            '{_mac}6s') # mac)
@@ -232,9 +315,13 @@ class OptSrcLLA(Struct):
         'get mac address string'
         return ll_from_b(self._mac) #pylint: disable-msg=no-member
 
+    def output(self, _, log):
+        log("option src_lladdr lladdr=%s" % (self.mac,))
 
-class OptPrefixInfo(Struct):
+class OptPrefixInfo(OptRA):
     'Prefix Information'
+    #RFC4861
+    #R flag is in RFC6275
     FMT = (OptRA.FMT +
            '{prefixlen}B'
            '{flags:L:A:R}B'  #on link, autoconf, router address
@@ -249,6 +336,15 @@ class OptPrefixInfo(Struct):
         'get ipv6 string'
         return ipv6_from_b(self._prefix) #pylint: disable-msg=no-member
 
+    #pylint: disable-msg=no-member
+    def output(self, _, log):
+        log("option prefix %(prefix)s/%(prefixlen)s A=%(A)s "
+            "L=%(L)s valid_sec=%(valid_sec)s pref_sec=%(pref_sec)s" % {
+                "prefix": self.prefix, "prefixlen": self.prefixlen,
+                "A": self.A, "L": self.L,
+                "valid_sec": self.valid_sec, "pref_sec": self.pref_sec
+            })
+
 RA_OPTS = {
     OptAdIval.TYPE: OptAdIval,
     OptRouteInfo.TYPE: OptRouteInfo,
@@ -261,17 +357,19 @@ RA_OPTS = {
 
 class RouterAdvertisement(Struct):
     """class containing fields of a router advertisement message"""
+    # RFC4861, H flag is in RFC6275, Prf in RFC4191
     FMT = ('!'
            '{type}B{code}B{checksum}H'
            '{hop_limit}B{flags:M:O:H:-2Prf:Proxy}B{lifetime}H'
            '{reach_sec}I'
            '{retrans_sec}I')  # Retransmission time
+    __slots__ = ("from_addr", "scope")
 
-def ll_from_b(b6):
+def ll_from_b(ll_b6):
     "converts a byte string into mac address string"
-    if len(b6) < 6:
-        b6 += "\x00" * 6 - len(b6)
-    return ":".join(["%02x" % ord(c) for c in b6[:6]])
+    if len(ll_b6) < 6:
+        ll_b6 += "\x00" * 6 - len(ll_b6)
+    return ":".join(["%02x" % ord(c) for c in ll_b6[:6]])
 
 def ipv6_from_b(b16):
     """converts a 16 byte string into an ipv6 text address.
@@ -496,37 +594,30 @@ def recv_ra(opts):
             continue
 
         tstamp = datetime.datetime.utcnow().isoformat()
+
+        ra_msg.scope = opts.interface #pylint: disable-msg=attribute-defined-outside-init
+        ra_msg.from_addr = peer_ipv6  #pylint: disable-msg=attribute-defined-outside-init
+
         print "%(ts)s ROUTER %(peer)s M=%(M)s O=%(O)s Pref=%(Prf)s" % {
             "ts": tstamp,
             "peer": peer_ipv6,
             "M": ra_msg.M, "O": ra_msg.O, 'Prf': ra_msg.Prf
         }
 
+        def log(to_log):
+            'passed to options for output'
+            print "%s    %s" % (tstamp, to_log)
+
         while data:
             opt, data_after = OptRA.parse(data)
             if not opt:
                 break
 
-            # RA_OPTS = {
-            #     OptAdIval.TYPE: OptAdIval,
-            #     OptRouteInfo.TYPE: OptRouteInfo,
-            #     RecursiveDNS.TYPE: RecursiveDNS,
-            #     DNSSearch.TYPE: DNSSearch,
-            #     OptMTU.TYPE: OptMTU,
-            #     OptSrcLLA.TYPE: OptSrcLLA,
-            #     OptPrefixInfo.TYPE: OptPrefixInfo
-            # }
-
-            if opt.type == 3: # Prefix Information
-                opt, data = OptPrefixInfo.parse(data)
-                print ("%(ts)s %(prefix)s/%(prefixlen)s A=%(A)s "
-                       "L=%(L)s valid_sec=%(valid_sec)s pref_sec=%(pref_sec)s") % {
-                           "ts": tstamp,
-                           "prefix": opt.prefix, "prefixlen": opt.prefixlen,
-                           "A": opt.A, "L": opt.L,
-                           "valid_sec": opt.valid_sec, "pref_sec": opt.pref_sec
-                       }
+            if opt.type in RA_OPTS:
+                opt, data = RA_OPTS.get(opt.type).parse(data)
+                opt.output(ra_msg, log)
             else:
+                log("Unknown type: %s" % (opt.type,))
                 # go to next opt
                 data = data_after
 
