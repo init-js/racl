@@ -374,13 +374,67 @@ def ll_from_b(ll_b6):
         ll_b6 += "\x00" * 6 - len(ll_b6)
     return ":".join(["%02x" % ord(c) for c in ll_b6[:6]])
 
+ZEROS_RE = re.compile("(^0)?(:0)+")
+
 def ipv6_from_b(b16):
-    """converts a 16 byte string into an ipv6 text address.
+    """converts a 16 byte ipv6 string into its canonical text address.
        Follows RFC5952.
+
+    >>> examples = (
+    ... "2001:0db8:0000:0000:0000:0000:0000:0001", # suppress leading zeroes
+    ... "0000:0000:0000:0000:0000:0000:0000:0000", # ::
+    ... "2001:0db8:0000:0000:0000:0000:0002:0000",
+    ... "0000:0db8:0000:0001:0001:0001:0001:0000", # do not compress single 0 field
+    ... "2001:0db8:0000:0000:0001:0000:0000:0001", # if n equal sleds, pick leftmost
+    ... "0002:0000:0000:8888:0000:0000:0000:aaaa", # compress longest sled
+    ... "0000:0000:0000:8888:0000:0000:0000:aaaa", # compress left
+    ... "0001:0000:0000:8888:8888:0000:0000:0000", # compress right
+    ... )
+    >>> for ex in examples:
+    ...     nodot = ex.replace(":", "")
+    ...     bin = ''.join([chr(int(nodot[i:i+2], 16)) for i in range(0, len(nodot), 2)])
+    ...     print ipv6_from_b(bin)
+    2001:db8::1
+    ::
+    2001:db8::2:0
+    0:db8:0:1:1:1:1:0
+    2001:db8::1:0:0:1
+    2:0:0:8888::aaaa
+    ::8888:0:0:0:aaaa
+    1:0:0:8888:8888::
     """
     if len(b16) < 16:
         b16 += "\x00" * (16 - len(b16))
-    return socket.inet_ntop(socket.AF_INET6, b16[:16])
+
+    if hasattr(socket, "inet_ntop"):
+        return socket.inet_ntop(socket.AF_INET6, b16[:16])
+
+    # slower -- not all systems have inet_ntop
+
+    ipstr = ":".join(["%x" % (ord(b16[i])*256 + ord(b16[i+1]))
+                      for i in range(0, 16, 2)])
+
+    best_match = (None, 1)
+
+    # opting for an 're' approach over nested for loop
+    # search. readability.
+    # this re works because no field has leading zeroes.
+    for sled_match in ZEROS_RE.finditer(ipstr):
+        num_zeros = (len(sled_match.group(0)) + 1) / 2
+        if num_zeros > best_match[1]:
+            best_match = (sled_match, num_zeros)
+    if best_match[0]:
+        repl = best_match[0]
+
+        # repl ends with '0'
+        # repl starts with ^, or ':'
+        if repl.end() == len(ipstr):
+            ipstr += ":"
+
+        ipstr = (ipstr[0:repl.start()] +
+                 ":" +
+                 ipstr[repl.end():])
+    return ipstr
 
 def ll_to_b(lladdr):
     """converts a mac address string to a 6b binary string
@@ -392,16 +446,38 @@ def ll_to_b(lladdr):
     return "".join([chr(int(octet_s, 16)) for octet_s in octets])
 
 def ipv6_to_b(ipv6):
-    """transforms a valid ipv6 address string into a 16b string
+    """transforms a well-formed ipv6 address string into a 16b string.
+       it does not need to be the canonical representation.
 
-    >>> for example in ("cafe::2","fe80:132:12:1::0321:0021:8", "a::", "::", "::fa"):
+    >>> for example in ("cafe::2","fe80:132:12:1::0321:0021:8", "a::", "::", "::1fa"):
     ...     print "".join([ "%02x" % ord(octet) for octet in ipv6_to_b(example)])
     cafe0000000000000000000000000002
     fe800132001200010000032100210008
     000a0000000000000000000000000000
-    000000000000000000000000000000fa
+    00000000000000000000000000000000
+    000000000000000000000000000001fa
     """
-    return socket.inet_pton(socket.AF_INET6, ipv6)
+    if hasattr(socket, "inet_pton"):
+        return socket.inet_pton(socket.AF_INET6, ipv6)
+
+    # slower -- not all systems have inet_pton
+
+    if ipv6 == "::":
+        return "\x00" * 16
+    elif ipv6.startswith("::"):
+        ipv6 = ipv6[1:]
+    elif ipv6.endswith("::"):
+        ipv6 = ipv6[:-1]
+
+    fields = ipv6.split(":")
+    b16 = ''
+    for field in fields:
+        if not field: # the ::
+            b16 += "\x00\x00" * (8 - len(fields) + 1)
+        else:
+            num = int(field, 16)
+            b16 += chr(num >> 8) + chr(num & 0xff)
+    return b16
 
 def ip_checksum(buf):
     """computes the ip checksum over the given buffer"""
