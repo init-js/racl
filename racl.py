@@ -30,6 +30,7 @@ import datetime
 import struct
 import re
 import netifaces
+import os
 
 VERSION = "0.1.0"
 
@@ -39,6 +40,8 @@ ICMPV6_ND_RA = 134
 ICMPV6_ND_RS_CODE = 0
 ICMPV6_ND_SRC_LLADDR = 1
 
+# 'posix', 'nt', 'mac', 'os2', 'ce', 'java', 'riscos'
+IS_WINDOWS = os.name == 'nt'
 
 class StructMeta(type):
     """A metaclass for classes defined based on structs
@@ -621,6 +624,30 @@ def recv_ra(opts):
                 # go to next opt
                 data = data_after
 
+def interface_info(interface):
+    info = {}
+
+    if IS_WINDOWS:
+        import _winreg as wr
+        try:
+            reg = wr.ConnectRegistry(None, wr.HKEY_LOCAL_MACHINE)
+            reg_key = wr.OpenKey(reg, "SYSTEM\\CurrentControlSet\\Control\\Network\\{4d36e972-e325-11ce-bfc1-08002be10318}")
+            reg_subkey = wr.OpenKey(reg_key, interface + "\\Connection")
+            info['name'] = wr.QueryValueEx(reg_subkey, 'Name')[0]
+        except WindowsError as exc:
+            pass
+    else:
+        info['name'] = interface
+    return info
+
+def list_interfaces():
+    for interface in netifaces.interfaces(): #pylint: disable=no-member
+        info = interface_info(interface)
+        if not info:
+            print interface, "(no information available)"
+        else:
+            print interface, info['name']
+
 def main():
     """command line entry point"""
     import argparse
@@ -630,13 +657,23 @@ def main():
 
     parser = argparse.ArgumentParser(description="Solicits routers to discover available IPv6 networks. "
                                      "(Version %s)" % VERSION)
-    parser.add_argument('interface', action="store",
+    parser.add_argument('interface', action="store", nargs='?',
                         help="the interface from which to send the solicitation")
     parser.add_argument('-r', action="store", dest="router",
                         help="router address to solicit (specify if known)", default="ff02::2")
     parser.add_argument('-u', action="store_true", dest="use_unspecified_src", default=False,
                         help="uses :: as the ipv6 source")
+    parser.add_argument('-l', action="store_true", dest="list_interfaces", default=False,
+                        help="list available interfaces")
     opts = parser.parse_args()
+
+    if not opts.interface and not opts.list_interfaces:
+        print >> sys.stderr, "you must specify either an interface or use -l"
+        sys.exit(1)
+
+    if opts.list_interfaces:
+        list_interfaces()
+        return 0
 
     send_rs(opts)
     recv_ra(opts)
