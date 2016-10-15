@@ -666,6 +666,10 @@ def recv_ra(opts):
         # data[0] is the first byte of an IPV6 packet
         data, addr = sock.recvfrom(1024)
         peer_ipv6 = addr[0]
+        if "%" in peer_ipv6:
+            peer_scope = peer_ipv6[peer_ipv6.find("%") + 1:]
+        else:
+            peer_scope = ""
 
         ra_msg, data = RouterAdvertisement.parse(data)
 
@@ -674,7 +678,7 @@ def recv_ra(opts):
 
         tstamp = datetime.datetime.utcnow().isoformat()
 
-        ra_msg.scope = opts.interface #pylint: disable-msg=attribute-defined-outside-init
+        ra_msg.scope = peer_scope #pylint: disable-msg=attribute-defined-outside-init
         ra_msg.from_addr = peer_ipv6  #pylint: disable-msg=attribute-defined-outside-init
 
         print "%(ts)s ROUTER %(peer)s M=%(M)s O=%(O)s Pref=%(Prf)s" % {
