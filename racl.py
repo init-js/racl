@@ -561,7 +561,7 @@ def get_if_macaddr(iface):
         raises ValueError if no such interface
     """
     addrs = netifaces.ifaddresses(iface) # pylint: disable=no-member
-    return addrs.get(socket.AF_PACKET, [{"addr":None}])[0]["addr"]
+    return addrs.get(netifaces.AF_LINK, [{"addr":None}])[0]["addr"]
 
 def get_link_local_v6(iface):
     """ returns a link local ipv6 for interface iface, or None.
