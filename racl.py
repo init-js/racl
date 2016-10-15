@@ -590,6 +590,11 @@ def scopeless(ipstr):
 def _bind_socket(sock, addr6="::", ifname=""):
     """bind given socket to ipv6 addr (string), and/or to given interface"""
 
+    # SO_BINDTODEVICE not available on windows.
+    # windows ipv6 stack implements strong host model
+    if IS_WINDOWS:
+        return
+
     if ifname:
         # bind socket to interface
         #socket.SO_BINDTODEVICE = 25
