@@ -553,13 +553,13 @@ def create_rs_packet(src, dst, lladdr=None):
         icmp_header = _icmp_header(0)
 
         pseudo_header = struct.pack(
-        '!'
-        '16s' # src
-        '16s' # dst
-        'I'  # icmpv6 len
-        'bbbb', # 3B zeros
-        src, dst, len(icmp_header) + len(lladdr_opt),
-        0, 0, 0, IP_ICMPV6)
+            '!'
+            '16s' # src
+            '16s' # dst
+            'I'  # icmpv6 len
+            'bbbb', # 3B zeros
+            src, dst, len(icmp_header) + len(lladdr_opt),
+            0, 0, 0, IP_ICMPV6)
         csum = ip_checksum(pseudo_header + icmp_header + lladdr_opt)
         icmp_header = _icmp_header(csum)
 
