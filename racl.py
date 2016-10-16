@@ -736,7 +736,7 @@ def recv_ra(opts):
 
             print "%(ts)s ROUTER %(peer)s M=%(M)s O=%(O)s Pref=%(Prf)s" % {
                 "ts": tstamp,
-                "peer": peer_ipv6,
+                "peer": ra_msg.from_addr,
                 "M": ra_msg.M, "O": ra_msg.O, 'Prf': ra_msg.Prf
             }
 
