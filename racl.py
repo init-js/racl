@@ -528,9 +528,16 @@ def create_rs_packet(src, dst, lladdr=None):
     else:
         lladdr_opt = ''
 
-    icmp_header = _icmp_header(0)
+    if IS_WINDOWS:
+        # Windows overwrites the checksum field with 0xffff
+        # if the input packet has anything else than 0x0000
+        # in the checksum field.
+        icmp_header = _icmp_header(0)
+    else:
+        # checksum computation is required.
+        icmp_header = _icmp_header(0)
 
-    pseudo_header = struct.pack(
+        pseudo_header = struct.pack(
         '!'
         '16s' # src
         '16s' # dst
@@ -538,10 +545,8 @@ def create_rs_packet(src, dst, lladdr=None):
         'bbbb', # 3B zeros
         src, dst, len(icmp_header) + len(lladdr_opt),
         0, 0, 0, IP_ICMPV6)
-
-    csum = ip_checksum(pseudo_header + icmp_header + lladdr_opt)
-
-    icmp_header = _icmp_header(csum)
+        csum = ip_checksum(pseudo_header + icmp_header + lladdr_opt)
+        icmp_header = _icmp_header(csum)
 
     ip_header = struct.pack(
         '!'
@@ -624,12 +629,23 @@ def send_rs(opts):
         # any ip on the interface
         src_ip6addr = "::"
 
-    # We need IPPROTO_RAW (and not the level below i.e. ICMPV6 RAW) to be
-    # able to override the source address field and set hops to
-    # 255. One cannot receive packets on an IPPROTO_RAW socket
-    # (i.e. send-only). RA messages will have to come in on a
-    # different socket.
-    sock = socket.socket(socket.AF_INET6, socket.SOCK_RAW, socket.IPPROTO_RAW)
+    # We use a RAW socket to send out an ICMPv6 packet.
+    # The lack of socket.sendmsg() makes it difficult to overwrite
+    # the routing information (source address), and hops limit
+    # (needs to be 255).
+
+    if IS_WINDOWS:
+        sock = socket.socket(socket.AF_INET6, socket.SOCK_RAW, socket.getprotobyname("ipv6-icmp"))
+        # The enum socket.IPPROTO_IPV6 (41L) is missing on windows 10. (python2.7)
+        sock.setsockopt(41L, socket.IP_HDRINCL, True)
+    else:
+        # We need IPPROTO_RAW (and not the level below i.e. ICMPV6 RAW) to be
+        # able to override the source address field and set hops to
+        # 255. One cannot receive packets on an IPPROTO_RAW socket
+        # (i.e. send-only). RA messages will have to come in on a
+        # different socket.
+        sock = socket.socket(socket.AF_INET6, socket.SOCK_RAW, socket.IPPROTO_RAW)
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, True)
 
     sock.setblocking(0)
     _bind_socket(sock, src_ip6addr, opts.interface)
@@ -645,7 +661,7 @@ def send_rs(opts):
     rs_packet = create_rs_packet(src=src_ip6addr,
                                  dst=opts.router,
                                  lladdr=src_link_addr)
-
+    print >> sys.stderr, "Sending Router Solicit from %s (mac=%s)..." % (src_ip6addr, src_link_addr)
     sock.sendto(rs_packet, (opts.router, 0))
     sock.close()
 
