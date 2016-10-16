@@ -33,6 +33,7 @@ import netifaces
 import os
 import select
 from contextlib import contextmanager
+import signal
 
 VERSION = "0.2.0"
 
@@ -45,16 +46,17 @@ ICMPV6_ND_SRC_LLADDR = 1
 # 'posix', 'nt', 'mac', 'os2', 'ce', 'java', 'riscos'
 IS_WINDOWS = os.name == 'nt'
 
-_exit_flag = False
-if IS_WINDOWS:
-    # console is giving us a hard time to exit
-    # CTRL-Brk doesn't exit gracefully
-    import signal
-    def handler(signum, frame):
-        global _exit_flag
-        if signum == signal.SIGINT:
-            _exit_flag = True
-    signal.signal(signal.SIGINT, handler)
+
+# Handle CTRL-C (windows + linux)
+_EXIT_FLAG = False
+def handler(signum, _):
+    'set a flag to end the event loop'
+    # windows console is giving us a hard time to exit.
+    # CTRL-Brk just kills the process.
+    global _EXIT_FLAG #pylint: disable-msg=global-statement
+    if signum == signal.SIGINT:
+        _EXIT_FLAG = True
+signal.signal(signal.SIGINT, handler)
 
 class StructMeta(type):
     """A metaclass for classes defined based on structs
@@ -796,13 +798,15 @@ def event_loop(opts):
     log("Waiting for RA messages on %s..." % (src_ip6addr,))
 
     if IS_WINDOWS and os.isatty(sys.stdin.fileno()):
+        # signals don't get processed until C code returns.
+        # allow CTRL-C to kick in.
         timeout = 2.0
     else:
         timeout = 0.0 #forever
 
     while inputs or outputs:
         readable, writable, exceptional = select.select(inputs, outputs, inputs, timeout)
-        if _exit_flag:
+        if _EXIT_FLAG:
             break
 
         tstamp = datetime.datetime.utcnow().isoformat()
@@ -815,7 +819,7 @@ def event_loop(opts):
             if not data:
                 log("connection closed.", ts=tstamp)
                 if IS_WINDOWS:
-                    sock.ioctl(socket.SIO_RCVALL, socket.RCVALL_OFF)
+                    sock.ioctl(socket.SIO_RCVALL, socket.RCVALL_OFF) #pylint: disable-msg=no-member
                 sock.close()
                 inputs.remove(sock)
                 continue
