@@ -673,7 +673,6 @@ def _rs_socket(opts):
         # (i.e. send-only). RA messages will have to come in on a
         # different socket.
         sock = socket.socket(socket.AF_INET6, socket.SOCK_RAW, socket.IPPROTO_RAW)
-        sock.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, True)
 
     _bind_socket(sock, src_ip6addr, opts.interface)
     return sock
@@ -849,7 +848,7 @@ def event_loop(opts):
             if sock in inputs:
                 inputs.remove(sock)
             if sock in outputs:
-                output.remove(sock)
+                outputs.remove(sock)
     log("done.")
 
 
