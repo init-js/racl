@@ -31,6 +31,7 @@ import struct
 import re
 import netifaces
 import os
+import select
 from contextlib import contextmanager
 
 VERSION = "0.1.0"
@@ -43,6 +44,17 @@ ICMPV6_ND_SRC_LLADDR = 1
 
 # 'posix', 'nt', 'mac', 'os2', 'ce', 'java', 'riscos'
 IS_WINDOWS = os.name == 'nt'
+
+_exit_flag = False
+if IS_WINDOWS:
+    # console is giving us a hard time to exit
+    # CTRL-Brk doesn't exit gracefully
+    import signal
+    def handler(signum, frame):
+        global _exit_flag
+        if signum == signal.SIGINT:
+            _exit_flag = True
+    signal.signal(signal.SIGINT, handler)
 
 class StructMeta(type):
     """A metaclass for classes defined based on structs
@@ -615,8 +627,18 @@ def _bind_socket(sock, addr6="::", ifname=""):
     bind_addr = get_addrinfo(addr6)
     sock.bind(bind_addr[0][-1])
 
-def send_rs(opts):
-    """send a router solicitation message"""
+def _ra_socket(opts):
+    #pylint: disable-msg=no-member
+    sock = socket.socket(socket.AF_INET6, socket.SOCK_RAW, socket.getprotobyname("ipv6-icmp"))
+
+    src_ip6addr = get_link_local_v6(opts.interface)
+    if not src_ip6addr:
+        raise ValueError("interface '%s' has no ipv6 link-local address" % (opts.interface))
+    _bind_socket(sock, src_ip6addr, opts.interface)
+    return sock
+
+def _rs_socket(opts):
+    "creates a raw socket on which we can send an RS packet"
 
     # valid interface
     if not opts.interface in netifaces.interfaces(): #pylint: disable=no-member
@@ -653,105 +675,56 @@ def send_rs(opts):
         sock = socket.socket(socket.AF_INET6, socket.SOCK_RAW, socket.IPPROTO_RAW)
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, True)
 
-    sock.setblocking(0)
     _bind_socket(sock, src_ip6addr, opts.interface)
+    return sock
 
-    src_link_addr = None
+def _send_rs(opts, sock):
+    """send a router solicitation message on sock"""
+
     if not opts.use_unspecified_src:
         # when the source IPv6 is not '::', RFC4861 requires a
         # source link local address option to be added.
         src_link_addr = get_if_macaddr(opts.interface)
+        src_ip6addr = get_link_local_v6(opts.interface)
+
         if not src_link_addr:
             raise ValueError("interface '%s' requires a mac address" % (opts.interface,))
+    else:
+        src_link_addr = None
+        src_ip6addr = "::"
 
     rs_packet = create_rs_packet(src=src_ip6addr,
                                  dst=opts.router,
                                  lladdr=src_link_addr)
-    print >> sys.stderr, "Sending Router Solicit from %s (mac=%s)..." % (src_ip6addr, src_link_addr)
+    log("Sending RS from %s to %s..." % (src_ip6addr, opts.router))
     sock.sendto(rs_packet, (opts.router, 0))
-    sock.close()
 
-@contextmanager
-def firehose(sock):
-    """on some platforms special flags need to be set on the packet to start
-       and stop receiving raw packets.
-    """
-    if IS_WINDOWS:
-        # RCVALL_IPLEVEL is not available for some reason.
-        # socket cannot be bound to unspecified address. It should be
-        # possible to determine which interface to tap into.
-        sock.ioctl(socket.SIO_RCVALL, socket.RCVALL_ON)
-    try:
-        yield sock
-    finally:
-        try:
-            if IS_WINDOWS:
-                sock.ioctl(socket.SIO_RCVALL, socket.RCVALL_OFF)
-        except Exception:
-            pass
+def _print_ra(opts, ra_msg, data):
+    """handle an input RA msg"""
 
-def recv_ra(opts):
-    """listen for router advertisement messages"""
-
-    #pylint: disable-msg=no-member
-    sock = socket.socket(socket.AF_INET6, socket.SOCK_RAW, socket.getprotobyname("ipv6-icmp"))
-
-    src_ip6addr = get_link_local_v6(opts.interface)
-    if not src_ip6addr:
-        raise ValueError("interface '%s' has no ipv6 link-local address" % (opts.interface))
-    _bind_socket(sock, src_ip6addr, opts.interface)
-
-    reprint = True
-    pktcount = 0
-
-    def log(to_log):
+    tstamp = datetime.datetime.utcnow().isoformat()
+    def log_option(to_log):
         'passed to options for output'
         print "%s    %s" % (tstamp, to_log)
 
-    with firehose(sock) as sock:
-        while True:
-            pktcount += 1
+    print "%(ts)s ROUTER %(peer)s M=%(M)s O=%(O)s Pref=%(Prf)s" % {
+        "ts": tstamp,
+        "peer": ra_msg.from_addr,
+        "M": ra_msg.M, "O": ra_msg.O, 'Prf': ra_msg.Prf
+    }
 
-            if reprint:
-                print >> sys.stderr, "Waiting for RA messages on", src_ip6addr, "..."
-                reprint = False
+    while data:
+        opt, data_after = OptRA.parse(data)
+        if not opt:
+            break
 
-            # data[0] is the first byte of an ICMPV6 packet
-            data, addr = sock.recvfrom(64*1024)
-            print >> sys.stderr, "[%d] %dB packet from %s" % (pktcount, len(data), addr[0])
-
-            ra_msg, data = RouterAdvertisement.parse(data)
-            if not ra_msg:
-                # msg too short
-                continue
-
-            if ra_msg.type != ICMPV6_ND_RA:
-                continue
-
-            reprint = True
-            tstamp = datetime.datetime.utcnow().isoformat()
-
-            ra_msg.scope = get_v6_scope(addr[0]) #pylint: disable-msg=attribute-defined-outside-init
-            ra_msg.from_addr = addr[0]  #pylint: disable-msg=attribute-defined-outside-init
-
-            print "%(ts)s ROUTER %(peer)s M=%(M)s O=%(O)s Pref=%(Prf)s" % {
-                "ts": tstamp,
-                "peer": ra_msg.from_addr,
-                "M": ra_msg.M, "O": ra_msg.O, 'Prf': ra_msg.Prf
-            }
-
-            while data:
-                opt, data_after = OptRA.parse(data)
-                if not opt:
-                    break
-
-                if opt.type in RA_OPTS:
-                    opt, data = RA_OPTS.get(opt.type).parse(data)
-                    opt.output(ra_msg, log)
-                else:
-                    log("Unknown type: %s" % (opt.type,))
-                    # go to next opt
-                    data = data_after
+        if opt.type in RA_OPTS:
+            opt, data = RA_OPTS.get(opt.type).parse(data)
+            opt.output(ra_msg, log_option)
+        else:
+            log("Unknown type: %s" % (opt.type,))
+            # go to next opt
+            data = data_after
 
 def interface_info(interface):
     info = {}
@@ -777,6 +750,109 @@ def list_interfaces():
         else:
             print "%40s %s" % (interface, info['name'])
 
+def log(msg, ts=None):
+    if ts is None:
+        ts = datetime.datetime.utcnow().isoformat()
+    print >> sys.stderr, "%s %s" % (ts, msg)
+
+def _print_disclaimer(opts):
+        # GPL
+    if os.isatty(sys.stdin.fileno()):
+        log("<racl v%s> Copyright (C) 2016 Jean-Sebastien Legare" % (VERSION,), ts="")
+        #log("This program comes with ABSOLUTELY NO WARRANTY;", ts="")
+        #log("This is free software, and you are welcome to redistribute it", ts="")
+        #log("under certain conditions;", ts="")
+    if IS_WINDOWS:
+        log("Press CTRL+C (or CTRL+Brk) to quit." + os.linesep, ts="")
+    else:
+        log("Press CTRL+C to quit.", ts="")
+
+def event_loop(opts):
+    'send rs packet and read incoming forever'
+
+    reprint = True
+    pktcount = 0
+    inputs = []
+    outputs = []
+
+    if not opts.passive:
+        outsock = _rs_socket(opts)
+        outsock.setblocking(0)
+        outputs.append(outsock)
+    else:
+        outsock = None
+
+    insock = _ra_socket(opts)
+    insock.setblocking(0)
+    if IS_WINDOWS:
+        # RCVALL_IPLEVEL is not available for some reason.
+        # socket cannot be bound to unspecified address. It should be
+        # possible to determine which interface to tap into.
+        insock.ioctl(socket.SIO_RCVALL, socket.RCVALL_ON)
+    inputs.append(insock)
+
+    _print_disclaimer(opts)
+
+    src_ip6addr = get_link_local_v6(opts.interface)
+    log("Waiting for RA messages on %s..." % (src_ip6addr,))
+
+    if IS_WINDOWS and os.isatty(sys.stdin.fileno()):
+        timeout = 2.0
+    else:
+        timeout = 0.0 #forever
+
+    while inputs or outputs:
+        readable, writable, exceptional = select.select(inputs, outputs, inputs, timeout)
+        if _exit_flag:
+            break
+
+        tstamp = datetime.datetime.utcnow().isoformat()
+        for sock in readable:
+            if sock is not insock:
+                continue
+
+            # data[0] is the first byte of an ICMPV6 packet
+            data, addr = sock.recvfrom(64*1024)
+            if not data:
+                log("connection closed.", ts=tstamp)
+                if IS_WINDOWS:
+                    sock.ioctl(socket.SIO_RCVALL, socket.RCVALL_OFF)
+                sock.close()
+                inputs.remove(sock)
+                continue
+            else:
+                pktcount += 1
+                if opts.verbose:
+                    log("[%d] %dB packet from %s" % (pktcount, len(data), addr[0]), ts=tstamp)
+                ra_msg, data = RouterAdvertisement.parse(data)
+                if not ra_msg:
+                    # msg too short
+                    continue
+                if ra_msg.type != ICMPV6_ND_RA:
+                    continue
+
+                ra_msg.scope = get_v6_scope(addr[0]) #pylint: disable-msg=attribute-defined-outside-init
+                ra_msg.from_addr = addr[0]  #pylint: disable-msg=attribute-defined-outside-init
+                _print_ra(opts, ra_msg, data)
+                log("Waiting for RA messages on %s..." % (src_ip6addr,), ts=tstamp)
+
+        for sock in writable:
+            if sock is not outsock:
+                continue
+            _send_rs(opts, sock)
+            outputs.remove(sock)
+            sock.close()
+
+        for sock in exceptional:
+            log("Socket exception. closing.", ts=tstamp)
+            sock.close()
+            if sock in inputs:
+                inputs.remove(sock)
+            if sock in outputs:
+                output.remove(sock)
+    log("done.")
+
+
 def main():
     """command line entry point"""
     import argparse
@@ -784,7 +860,7 @@ def main():
     if not socket.has_ipv6:
         raise ValueError("There's no support for IPV6!")
 
-    parser = argparse.ArgumentParser(description="Solicits routers to discover available IPv6 networks. "
+    parser = argparse.ArgumentParser(description="Solicit routers and/or discover available IPv6 networks via Router Advertisements. "
                                      "(Version %s)" % VERSION)
     parser.add_argument('interface', action="store", nargs='?',
                         help="the interface from which to send the solicitation")
@@ -794,6 +870,10 @@ def main():
                         help="uses :: as the ipv6 source")
     parser.add_argument('-l', action="store_true", dest="list_interfaces", default=False,
                         help="list available interfaces")
+    parser.add_argument("-v", action="store_true", dest="verbose", default=False,
+                        help="increase verbosity. print info on non-RA packets received")
+    parser.add_argument("-p", action="store_true", dest="passive", default=False,
+                        help="passive mode. do not solicit routers")
     opts = parser.parse_args()
 
     if not opts.interface and not opts.list_interfaces:
@@ -804,8 +884,7 @@ def main():
         list_interfaces()
         return 0
 
-    send_rs(opts)
-    recv_ra(opts)
+    event_loop(opts)
     return 0
 
 if __name__ == "__main__":
