@@ -34,7 +34,7 @@ import os
 import select
 from contextlib import contextmanager
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 
 IP_ICMPV6 = 58
 ICMPV6_ND_RS = 133
