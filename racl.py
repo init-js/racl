@@ -577,6 +577,13 @@ def get_link_local_v6(iface):
                    if x.get('addr', "").startswith("fe80::")]
     return link_locals[0] if link_locals else None
 
+def get_v6_scope(addr6):
+    """ returns the scope (with % stripped) of the ipv6 address, if any"""
+    if "%" in addr6:
+        return addr6[addr6.find("%") + 1:]
+    else:
+        return ""
+
 def get_addrinfo(ipstr):
     """ get the internet address from the given string """
     bind_addr = [addr for addr in socket.getaddrinfo(ipstr, None, socket.AF_INET6)]
@@ -597,10 +604,8 @@ def _bind_socket(sock, addr6="::", ifname=""):
 
     # SO_BINDTODEVICE not available on windows.
     # windows ipv6 stack implements strong host model
-    if IS_WINDOWS:
-        return
 
-    if ifname:
+    if ifname and not IS_WINDOWS:
         # bind socket to interface
         #socket.SO_BINDTODEVICE = 25
         sock.setsockopt(socket.SOL_SOCKET, 25, ifname[:16] + '\0')
@@ -745,9 +750,9 @@ def list_interfaces():
     for interface in netifaces.interfaces(): #pylint: disable=no-member
         info = interface_info(interface)
         if not info:
-            print interface, "(no information available)"
+            print "%40s %s" % (interface, "(no information available)")
         else:
-            print interface, info['name']
+            print "%40s %s" % (interface, info['name'])
 
 def main():
     """command line entry point"""
