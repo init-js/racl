@@ -461,7 +461,7 @@ def ipv6_to_b(ipv6):
         return socket.inet_pton(socket.AF_INET6, ipv6)
 
     # slower -- not all systems have inet_pton
-
+    ipv6 = scopeless(ipv6)
     if ipv6 == "::":
         return "\x00" * 16
     elif ipv6.startswith("::"):
