@@ -31,6 +31,7 @@ import struct
 import re
 import netifaces
 import os
+from contextlib import contextmanager
 
 VERSION = "0.1.0"
 
@@ -670,65 +671,87 @@ def send_rs(opts):
     sock.sendto(rs_packet, (opts.router, 0))
     sock.close()
 
+@contextmanager
+def firehose(sock):
+    """on some platforms special flags need to be set on the packet to start
+       and stop receiving raw packets.
+    """
+    if IS_WINDOWS:
+        # RCVALL_IPLEVEL is not available for some reason.
+        # socket cannot be bound to unspecified address. It should be
+        # possible to determine which interface to tap into.
+        sock.ioctl(socket.SIO_RCVALL, socket.RCVALL_ON)
+    try:
+        yield sock
+    finally:
+        try:
+            if IS_WINDOWS:
+                sock.ioctl(socket.SIO_RCVALL, socket.RCVALL_OFF)
+        except Exception:
+            pass
+
 def recv_ra(opts):
     """listen for router advertisement messages"""
 
     #pylint: disable-msg=no-member
-
     sock = socket.socket(socket.AF_INET6, socket.SOCK_RAW, socket.getprotobyname("ipv6-icmp"))
 
-    if not opts.use_unspecified_src:
-        # bind to link-local ipv6 address on interface
-        src_ip6addr = get_link_local_v6(opts.interface)
-        if not src_ip6addr:
-            raise ValueError("interface '%s' has no ipv6 link-local address" % (opts.interface))
-    else:
-        # any ip on the interface
-        src_ip6addr = "::"
-
+    src_ip6addr = get_link_local_v6(opts.interface)
+    if not src_ip6addr:
+        raise ValueError("interface '%s' has no ipv6 link-local address" % (opts.interface))
     _bind_socket(sock, src_ip6addr, opts.interface)
 
-    while True:
-        # data[0] is the first byte of an IPV6 packet
-        data, addr = sock.recvfrom(1024)
-        peer_ipv6 = addr[0]
-        if "%" in peer_ipv6:
-            peer_scope = peer_ipv6[peer_ipv6.find("%") + 1:]
-        else:
-            peer_scope = ""
+    reprint = True
+    pktcount = 0
 
-        ra_msg, data = RouterAdvertisement.parse(data)
+    def log(to_log):
+        'passed to options for output'
+        print "%s    %s" % (tstamp, to_log)
 
-        if ra_msg.type != ICMPV6_ND_RA:
-            continue
+    with firehose(sock) as sock:
+        while True:
+            pktcount += 1
 
-        tstamp = datetime.datetime.utcnow().isoformat()
+            if reprint:
+                print >> sys.stderr, "Waiting for RA messages on", src_ip6addr, "..."
+                reprint = False
 
-        ra_msg.scope = peer_scope #pylint: disable-msg=attribute-defined-outside-init
-        ra_msg.from_addr = peer_ipv6  #pylint: disable-msg=attribute-defined-outside-init
+            # data[0] is the first byte of an ICMPV6 packet
+            data, addr = sock.recvfrom(64*1024)
+            print >> sys.stderr, "[%d] %dB packet from %s" % (pktcount, len(data), addr[0])
 
-        print "%(ts)s ROUTER %(peer)s M=%(M)s O=%(O)s Pref=%(Prf)s" % {
-            "ts": tstamp,
-            "peer": peer_ipv6,
-            "M": ra_msg.M, "O": ra_msg.O, 'Prf': ra_msg.Prf
-        }
+            ra_msg, data = RouterAdvertisement.parse(data)
+            if not ra_msg:
+                # msg too short
+                continue
 
-        def log(to_log):
-            'passed to options for output'
-            print "%s    %s" % (tstamp, to_log)
+            if ra_msg.type != ICMPV6_ND_RA:
+                continue
 
-        while data:
-            opt, data_after = OptRA.parse(data)
-            if not opt:
-                break
+            reprint = True
+            tstamp = datetime.datetime.utcnow().isoformat()
 
-            if opt.type in RA_OPTS:
-                opt, data = RA_OPTS.get(opt.type).parse(data)
-                opt.output(ra_msg, log)
-            else:
-                log("Unknown type: %s" % (opt.type,))
-                # go to next opt
-                data = data_after
+            ra_msg.scope = get_v6_scope(addr[0]) #pylint: disable-msg=attribute-defined-outside-init
+            ra_msg.from_addr = addr[0]  #pylint: disable-msg=attribute-defined-outside-init
+
+            print "%(ts)s ROUTER %(peer)s M=%(M)s O=%(O)s Pref=%(Prf)s" % {
+                "ts": tstamp,
+                "peer": peer_ipv6,
+                "M": ra_msg.M, "O": ra_msg.O, 'Prf': ra_msg.Prf
+            }
+
+            while data:
+                opt, data_after = OptRA.parse(data)
+                if not opt:
+                    break
+
+                if opt.type in RA_OPTS:
+                    opt, data = RA_OPTS.get(opt.type).parse(data)
+                    opt.output(ra_msg, log)
+                else:
+                    log("Unknown type: %s" % (opt.type,))
+                    # go to next opt
+                    data = data_after
 
 def interface_info(interface):
     info = {}
