@@ -269,7 +269,7 @@ class DNSSearch(OptRA):
 
     def __init__(self, data):
         super(DNSSearch, self).__init__(data)
-        self._names = data[8:len(self)-8]
+        self._names = data[8:len(data)-8]
         first_nul = self._names.find("\x00")
         if first_nul > -1:
             # remove padding
